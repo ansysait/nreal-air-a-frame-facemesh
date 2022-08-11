@@ -17,10 +17,18 @@
       z-index: 100;
       opacity: 0.5;
     }
+    #fixed p {
+      margin: 0;
+    }
 
     #output {
       width: 300px;
       height: auto;
+      transition: width 0.5s;
+    }
+
+    #fixed.hide #output {
+      width: 0;
     }
 
     #face_video {
@@ -54,6 +62,7 @@
 				">
       </video>
     </div>
+    <p><button id="hide_switch">顔 表示/非表示</button></p>
   </div>
 
   <script>
@@ -67,6 +76,13 @@
 
     let cameraWrapper = document.getElementById("camera-wrapper");
     let camera = document.getElementById("camera");
+
+    const hide_switch = document.getElementById("hide_switch");
+    const fixedElm = document.getElementById("fixed");
+
+    hide_switch.addEventListener("click", function (evt) {
+      fixedElm.classList.toggle("hide");
+    }, false);
 
     const state = {
       maxFaces: 1,

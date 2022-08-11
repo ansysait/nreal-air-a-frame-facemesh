@@ -1,0 +1,274 @@
+<html lang="ja" dir="ltr">
+
+<head>
+  <meta charset="UTF-8">
+  <title>nreal-air-a-frame-facemesh</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@2.0.0/dist/tf-backend-wasm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/facemesh@0.0.3"></script>
+  <script src="./triangulation.js"></script>
+  <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+  <style>
+    #fixed {
+      position: fixed;
+      bottom: 0;
+      right: 0;
+      background: #fff;
+      z-index: 100;
+      opacity: 0.5;
+    }
+
+    #output {
+      width: 300px;
+      height: auto;
+    }
+
+    #face_video {
+      position: absolute;
+      z-index: -1;
+    }
+  </style>
+</head>
+
+<body>
+  <a-scene>
+    <a-sphere position="-10 2 -10" radius="1.25" color="#EF2D5E"></a-sphere>
+    <a-box position="-1 -1 -3" rotation="0 45 0" color="#4CC3D9"></a-box>
+    <a-cylinder position="6 0.75 -4" radius="0.5" height="1.5" color="#FFC65D"></a-cylinder>
+    <a-sky color="#000000"></a-sky>
+
+    <a-entity id="camera-wrapper">
+      <a-entity camera id="camera" position="0 1.5 0" look-controls></a-entity>
+    </a-entity>
+  </a-scene>
+
+  <div id="fixed">
+    <div class="canvas-wrapper">
+      <canvas id="output"></canvas>
+      <video id="face_video" playsinline style="
+				-webkit-transform: scaleX(-1);
+				transform: scaleX(-1);
+				visibility: hidden;
+				width: auto;
+				height: auto;
+				">
+      </video>
+    </div>
+  </div>
+
+  <script>
+
+    function roundDecimal(value, n) {
+      return Math.round(value * Math.pow(10, n)) / Math.pow(10, n);
+    }
+
+    let now_x = 0;
+    let now_y = 0;
+
+    let cameraWrapper = document.getElementById("camera-wrapper");
+    let camera = document.getElementById("camera");
+
+    const state = {
+      maxFaces: 1,
+      triangulateMesh: true
+    };
+
+    let model, ctx, videoWidth, videoHeight, video, canvas;
+
+    videoWidth = 600;
+    videoHeight = 400;
+
+    tf.setBackend('wasm').then(() => main());
+
+    async function main() {
+
+      await setupCamera();
+
+      video.play();
+      videoWidth = video.videoWidth;
+      videoHeight = video.videoHeight;
+      video.width = videoWidth;
+      video.height = videoHeight;
+
+      canvas = document.getElementById('output');
+      canvas.width = videoWidth;
+      canvas.height = videoHeight;
+      const canvasContainer = document.querySelector('.canvas-wrapper');
+
+      ctx = canvas.getContext('2d');
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.fillStyle = '#32EEDB';
+      ctx.strokeStyle = '#32EEDB';
+      ctx.lineWidth = 0.5;
+
+      model = await facemesh.load({ maxFaces: state.maxFaces });
+      renderPrediction();
+    }
+
+    function head_pose_estimation(faces, rightEye, leftEye) {
+
+      const rotate = tf.tidy(() => {
+        const fecePoints = tf.tensor(faces);
+        const eye1 = tf.tensor1d(rightEye);
+        const eye2 = tf.tensor1d(leftEye);
+        const scales = fecePoints.div(tf.norm(eye1.sub(eye2))).mul(0.06);
+        const centered = scales.sub(scales.mean(axis = 0));
+
+        const c00 = centered.slice(0, 1).as1D();
+        const c09 = centered.slice(9, 1).as1D();
+        const c18 = centered.slice(18, 1).as1D();
+        const c27 = centered.slice(27, 1).as1D();
+
+        const rotate0 = c18.sub(c00).div(tf.norm(c18.sub(c00)));
+        const rotate1 = c09.sub(c27).div(tf.norm(c09.sub(c27)));
+
+        return tf.concat([rotate0, rotate1]).arraySync();
+      });
+
+      const m00 = rotate[0];
+      const m01 = rotate[1];
+      const m02 = rotate[2];
+
+      const m10 = rotate[3];
+      const m11 = rotate[4];
+      const m12 = rotate[5];
+
+      // cross product
+      const m20 = m01 * m12 - m02 * m11;
+      const m21 = m02 * m10 - m00 * m12;
+      const m22 = m00 * m11 - m01 * m10;
+
+      let yaw, pitch, roll;
+      let sy = Math.sqrt(m00 * m00 + m10 * m10);
+      let singular = sy < 10 ** -6;
+
+      if (!singular) {
+        yaw = Math.atan2(m21, m22);
+        pitch = Math.atan2(-m20, sy);
+        roll = Math.atan2(m10, m00);
+      } else {
+        yaw = Math.atan2(-m12, m11);
+        pitch = Math.atan2(-m20, sy);
+        roll = 0;
+      }
+
+      head_rotation(yaw,pitch);
+
+    }
+
+    async function renderPrediction() {
+
+      const predictions = await model.estimateFaces(video);
+      ctx.drawImage(video, 0, 0, videoWidth, videoHeight, 0, 0, canvas.width, canvas.height);
+
+      if (predictions.length > 0) {
+        predictions.forEach(prediction => {
+          const keypoints = prediction.scaledMesh;
+          const annotations = prediction.annotations;
+
+          const rightEyeLower1 = annotations.rightEyeLower1[8];
+          const leftEyeLower1 = annotations.leftEyeLower1[8];
+
+          if (state.triangulateMesh) {
+            for (let i = 0; i < TRIANGULATION.length / 3; i++) {
+              const points = [
+                TRIANGULATION[i * 3], TRIANGULATION[i * 3 + 1],
+                TRIANGULATION[i * 3 + 2]
+              ].map(index => keypoints[index]);
+              drawPath(ctx, points, true);
+            }
+          }
+
+          // face dot drawing
+          let model_points = [rightEyeLower1, leftEyeLower1];
+          for (let i = 0; i < model_points.length; i++) {
+            const x = model_points[i][0];
+            const y = model_points[i][1];
+            ctx.beginPath();
+            ctx.fillStyle = "#FF0000";
+            ctx.arc(x, y, 3 /* radius */, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+
+          let contour_points = [0, 18, 9, 27];
+          for (let i of contour_points) {
+            const x = annotations.silhouette[i][0];
+            const y = annotations.silhouette[i][1];
+            ctx.beginPath();
+            ctx.fillStyle = (i == 0 || i == 18) ? "#FFFF00" : "#0000FF";
+            ctx.arc(x, y, 3 /* radius */, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+          head_pose_estimation(annotations.silhouette, rightEyeLower1, leftEyeLower1);
+        });
+      }
+      requestAnimationFrame(renderPrediction);
+    }
+
+    function drawPath(ctx, points, closePath) {
+      const region = new Path2D();
+      region.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) {
+        const point = points[i];
+        region.lineTo(point[0], point[1]);
+      }
+
+      if (closePath) {
+        region.closePath();
+      }
+      ctx.stroke(region);
+    }
+
+    async function setupCamera() {
+      video = document.getElementById('face_video');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        'audio': false,
+        'video': {
+          facingMode: 'user',
+          // Only setting the video to a specified size in order to accommodate a
+          // point cloud, so on mobile devices accept the default size.
+          width: videoWidth,
+          height: videoHeight
+        },
+      });
+      video.srcObject = stream;
+
+      return new Promise((resolve) => {
+        video.onloadedmetadata = () => {
+          resolve(video);
+        };
+      });
+    }
+
+    function head_rotation(yaw,pitch){
+      yaw = roundDecimal(yaw, 3)
+      pitch = roundDecimal(pitch, 3)
+
+      let x = cameraWrapper.getAttribute("rotation").x;
+      let y = cameraWrapper.getAttribute("rotation").y;
+      let z = cameraWrapper.getAttribute("rotation").z;
+      let y_degree = pitch * (180 / Math.PI);
+      let new_y = (now_y + y_degree) / 2;
+      now_y = new_y;
+
+      let x_degree = yaw * (180 / Math.PI);
+      if (x_degree > 0) {
+        x_degree = (x_degree - 180);
+      } else if (x_degree < 0) {
+        x_degree = x_degree + 180;
+      }
+      let new_x = (now_x + x_degree) / 2;
+      now_x = new_x;
+
+      cameraWrapper.setAttribute("rotation", {
+        x: now_x,
+        y: -new_y,
+      });
+    }
+
+  </script>
+</body>
+
+</html>
